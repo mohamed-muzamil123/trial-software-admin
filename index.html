@@ -570,6 +570,7 @@
         const db = getFirestore(app);
 
         let students = [], programmes = [], teams = [], categories = [], availableStudents = [], selectedProgramme = null;
+        let selectedStudentIds = new Set();
         let unsubscribeStudents = null, unsubscribeProgrammes = null, unsubscribeTeams = null, unsubscribeCategories = null;
 
         // Expose functions to global scope
@@ -627,20 +628,23 @@
             }, (error) => console.error('Error loading students:', error));
         }
 
-        function loadProgrammes() {
-            if (unsubscribeProgrammes) unsubscribeProgrammes();
-            const q = query(collection(db, 'programmes'));
-            unsubscribeProgrammes = onSnapshot(q, (snapshot) => {
-                programmes = snapshot.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.serial || 0) - (b.serial || 0));
-                updateDashboard();
-                if (!document.getElementById('programmes').classList.contains('d-none')) {
-                    filterProgrammes();
-                }
-                if (document.getElementById('assignCategory').value) {
-                    loadProgrammesDropdown();
-                }
-            }, (error) => console.error('Error loading programmes:', error));
+       // Helper logic: Modified loadProgrammes to preserve assignProgramme selection
+function loadProgrammes() {
+    if (unsubscribeProgrammes) unsubscribeProgrammes();
+    const q = query(collection(db, 'programmes'));
+    unsubscribeProgrammes = onSnapshot(q, (snapshot) => {
+        programmes = snapshot.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.serial || 0) - (b.serial || 0));
+        updateDashboard();
+        if (!document.getElementById('programmes').classList.contains('d-none')) {
+            filterProgrammes();
         }
+        if (document.getElementById('assignCategory').value) {
+            const currentProgValue = document.getElementById('assignProgramme').value;
+            loadProgrammesDropdown();
+            document.getElementById('assignProgramme').value = currentProgValue;
+        }
+    }, (error) => console.error('Error loading programmes:', error));
+}
 
         function loadTeams() {
             if (unsubscribeTeams) unsubscribeTeams();
@@ -994,7 +998,7 @@
                 showToast('Error', 'Category name already exists', 'error');
                 return;
             }
-            const data = { name };
+            const data = { name }; 
             const id = document.getElementById('categoryId').value;
             const isAdd = !id;
             const currentCategory = isAdd ? null : categories.find(c => c.id === id);
@@ -1058,8 +1062,12 @@
                 document.getElementById('assignmentContent').classList.add('d-none');
                 return;
             }
-            selectedProgramme = programmes.find(p => p.id === progId);
-            if (!selectedProgramme) return;
+            const newProgramme = programmes.find(p => p.id === progId);
+            if (!newProgramme) return;
+            if (selectedProgramme && selectedProgramme.id !== progId) {
+                selectedStudentIds.clear();
+            }
+            selectedProgramme = newProgramme;
             document.getElementById('assignmentContent').classList.remove('d-none');
             availableStudents = selectedProgramme.category === 'General' ? [...students] : students.filter(s => s.category === selectedProgramme.category);
             populateTeamSelect('availTeamFilter', '<option value="">All Teams</option>');
@@ -1090,6 +1098,37 @@
                     <td>${s.team}</td>
                 </tr>
             `).join('');
+            const checks = tbody.querySelectorAll('.assignCheck');
+            let allChecked = true;
+            let someChecked = false;
+            checks.forEach(check => {
+                const id = check.value;
+                check.checked = selectedStudentIds.has(id);
+                if (check.checked) {
+                    someChecked = true;
+                } else {
+                    allChecked = false;
+                }
+                check.addEventListener('change', (e) => {
+                    const cid = e.target.value;
+                    if (e.target.checked) {
+                        selectedStudentIds.add(cid);
+                    } else {
+                        selectedStudentIds.delete(cid);
+                    }
+                });
+            });
+            const selectAll = document.getElementById('selectAllAvail');
+            if (allChecked) {
+                selectAll.checked = true;
+                selectAll.indeterminate = false;
+            } else if (someChecked) {
+                selectAll.checked = false;
+                selectAll.indeterminate = true;
+            } else {
+                selectAll.checked = false;
+                selectAll.indeterminate = false;
+            }
         };
 
         window.clearAvailFilters = function() {
@@ -1102,32 +1141,77 @@
         window.selectAllAvailable = function(checked) {
             const tbody = document.getElementById('availableStudentsTbody');
             const checks = tbody.querySelectorAll('.assignCheck');
-            checks.forEach(check => check.checked = checked);
+            checks.forEach(check => {
+                const id = check.value;
+                check.checked = checked;
+                if (checked) {
+                    selectedStudentIds.add(id);
+                } else {
+                    selectedStudentIds.delete(id);
+                }
+            });
+            const selectAll = document.getElementById('selectAllAvail');
+            selectAll.indeterminate = false;
         };
 
-        window.assignSelectedStudents = async function() {
-            if (!selectedProgramme) return;
-            const checks = document.querySelectorAll('#availableStudentsTbody .assignCheck:checked');
-            const ids = Array.from(checks).map(c => c.value);
-            if (ids.length === 0) {
-                showToast('Error', 'Please select at least one student', 'error');
-                return;
+      window.assignSelectedStudents = async function() {
+    if (!selectedProgramme) return;
+    const ids = Array.from(selectedStudentIds);
+    if (ids.length === 0) {
+        showToast('Error', 'Please select at least one student', 'error');
+        return;
+    }
+    const currentCatValue = document.getElementById('assignCategory').value;
+    const currentProgValue = document.getElementById('assignProgramme').value;
+    const selectedStudents = ids.map(id => students.find(s => s.id === id)).filter(Boolean);
+    const isGeneral = selectedProgramme.category === 'General';
+    
+    if (isGeneral) {
+        const assignedIds = selectedProgramme.assignedStudents || [];
+        const assignedStudentsList = assignedIds.map(id => students.find(s => s.id === id)).filter(Boolean);
+        let assignedPerTeam = {};
+        assignedStudentsList.forEach(s => {
+            const t = s.team;
+            assignedPerTeam[t] = (assignedPerTeam[t] || 0) + 1;
+        });
+        let selectedPerTeam = {};
+        selectedStudents.forEach(s => {
+            const t = s.team;
+            selectedPerTeam[t] = (selectedPerTeam[t] || 0) + 1;
+        });
+        let violations = [];
+        Object.keys(selectedPerTeam).forEach(team => {
+            const current = assignedPerTeam[team] || 0;
+            const adding = selectedPerTeam[team];
+            if (current + adding > selectedProgramme.participantCount) {
+                violations.push(team);
             }
-            const isGeneral = selectedProgramme.category === 'General';
-            const currentAssigned = selectedProgramme.assignedStudents ? selectedProgramme.assignedStudents.length : 0;
-            if (isGeneral && (currentAssigned + ids.length > selectedProgramme.participantCount)) {
-                showToast('Error', `Cannot assign more than ${selectedProgramme.participantCount} students for General programme`, 'error');
-                return;
-            }
-            try {
-                const newAssigned = [...(selectedProgramme.assignedStudents || []), ...ids];
-                await updateDoc(doc(db, 'programmes', selectedProgramme.id), { assignedStudents: newAssigned });
-                showToast('Success', `${ids.length} students assigned successfully`);
-                loadAssignmentTables(); // Reload to update
-            } catch (error) {
-                showToast('Error', 'Failed to assign students: ' + error.message, 'error');
-            }
-        };
+        });
+        if (violations.length > 0) {
+            const team = violations[0];
+            showToast('Error', `Cannot assign more than ${selectedProgramme.participantCount} students from team ${team} for this programme`, 'error');
+            return;
+        }
+    }
+    
+    try {
+        const newAssigned = [...(selectedProgramme.assignedStudents || []), ...ids];
+        await updateDoc(doc(db, 'programmes', selectedProgramme.id), { assignedStudents: newAssigned });
+        
+        // Update selectedProgramme reference
+        selectedProgramme = programmes.find(p => p.id === currentProgValue) || selectedProgramme;
+        
+        // Clear only selected checkboxes
+        ids.forEach(id => selectedStudentIds.delete(id));
+        
+        showToast('Success', `${ids.length} students assigned successfully`);
+        
+        // Reload tables without losing selection
+        loadAssignmentTables(); // THIS ensures the tables update correctly
+    } catch (error) {
+        showToast('Error', 'Failed to assign students: ' + error.message, 'error');
+    }
+};
 
         function renderAssignedStudents() {
             if (!selectedProgramme) return;
@@ -1147,19 +1231,27 @@
             `).join('');
         }
 
-        window.removeStudentFromProgramme = async function(studentId) {
-            if (!selectedProgramme) return;
-            if (!confirm('Are you sure you want to remove this student?')) return;
-            const assignedIds = selectedProgramme.assignedStudents || [];
-            const newAssigned = assignedIds.filter(id => id !== studentId);
-            try {
-                await updateDoc(doc(db, 'programmes', selectedProgramme.id), { assignedStudents: newAssigned });
-                showToast('Success', 'Student removed successfully');
-                loadAssignmentTables(); // Reload
-            } catch (error) {
-                showToast('Error', 'Failed to remove student: ' + error.message, 'error');
-            }
-        };
+window.removeStudentFromProgramme = async function(studentId) {
+    if (!selectedProgramme) return;
+    if (!confirm('Are you sure you want to remove this student?')) return;
+    const currentCatValue = document.getElementById('assignCategory').value;
+    const currentProgValue = document.getElementById('assignProgramme').value;
+    const assignedIds = selectedProgramme.assignedStudents || [];
+    const newAssigned = assignedIds.filter(id => id !== studentId);
+    try {
+        await updateDoc(doc(db, 'programmes', selectedProgramme.id), { assignedStudents: newAssigned });
+        
+        // Update selectedProgramme reference
+        selectedProgramme = programmes.find(p => p.id === currentProgValue) || selectedProgramme;
+        
+        showToast('Success', 'Student removed successfully');
+        
+        // Reload tables without losing selection
+        loadAssignmentTables(); // THIS ensures the tables update correctly
+    } catch (error) {
+        showToast('Error', 'Failed to remove student: ' + error.message, 'error');
+    }
+};
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
